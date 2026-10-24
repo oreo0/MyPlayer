@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+.AppleDouble
+._*
+# Xcode local state / build products
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+work/
+outputs/
+*.app/
+*.dmg
+*.zip
+*.dSYM/
+*.xcarchive/
+BuildNumber.lock
+# Local credentials / environment
+.env
+.env.*
+!.env.example
+*.p12
+*.mobileprovision
+*.provisionprofile
+# Python
+__pycache__/
+*.py[cod]
