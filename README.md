@@ -1,7 +1,7 @@
 # MyPlayer
 
-一个纯净的本地 macOS 音频和视频播放器，使用 AI 协助制作。
-A pure, local music and video player for macOS, made with Love ❤️ and ChatGPT.
+一个纯净的本地 macOS 音视频播放器，ChatGPT 协助制作。
+A pure, local audio and video player for macOS, made with Passion and ChatGPT.
 
 **当前版本：MyPlayer v4.0.20**
 **系统要求：macOS 27 或更新版本；Apple Silicon（arm64）。不支持 Intel Mac。**
@@ -17,12 +17,12 @@ A pure, local music and video player for macOS, made with Love ❤️ and ChatGP
 
 ## 功能
 
-- 本地音频、视频播放；资料库列表及按专辑、艺人、文件夹浏览的封面视图。
-- 我的合集、喜欢、播放队列、文件夹扫描与自定义快捷键。
-- LRC 歌词及 SRT/VTT 视频字幕、播放进度和会话恢复。
-- SwiftUI 与 AppKit 原生组件、Apple 平台媒体框架、封面取色及极光光效。
-- 毛玻璃、深层磨砂、纯色背景及明暗外观；保留主题强调色。
-- 保留旧版资料库和设置；升级应用包不会重置数据。
+- **随封面变化的音乐氛围**：封面取色搭配极光光效，让每张专辑都有自己的视觉表达。
+- **可定制的质感界面**：毛玻璃、深层磨砂与纯色背景，搭配明暗外观和主题强调色。
+- **音乐与视频一站播放**：本地音视频统一管理，同时支持同步歌词与视频字幕。
+- **自由组织个人收藏**：按专辑、艺人、文件夹浏览，也能创建专属合集，整理喜欢的内容。
+- **接续上次的播放**：记住播放进度与会话状态，再次打开即可继续。
+- **为 Mac 打造的原生体验**：融合 macOS 原生界面与自定义快捷键，让浏览和播放更顺手。
 
 ## 用户数据与 iCloud
 
@@ -30,7 +30,7 @@ A pure, local music and video player for macOS, made with Love ❤️ and ChatGP
 
 提供 iCloud Drive 文件备份与重装恢复逻辑，覆盖资料库记录、设置、封面、歌词/字幕副本、合集、队列与播放状态；**音乐和视频原文件不上传，仍保留原位置**。
 
-**已知限制：**本地备份/恢复流程已用合成数据验证；此前开发环境遇到 iCloud 账户访问错误；本次性能测试使用本地模拟目录，未重新验证服务器上传和跨设备恢复。请勿将这一功能作为唯一备份。详情见 [USER-DATA.md](USER-DATA.md)。
+**已知限制：**本地备份/恢复流程已用合成数据验证，未重新验证服务器上传和跨设备恢复。请勿将这一功能作为唯一备份。详情见 [USER-DATA.md](USER-DATA.md)。
 
 ## 从源码构建
 
