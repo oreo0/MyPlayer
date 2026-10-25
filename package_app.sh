@@ -9,6 +9,9 @@ fi
 stage="$(mktemp -d /tmp/MyPlayer-package.XXXXXX)"
 trap 'rm -rf "$stage"' EXIT
 ditto --norsrc "$workspace/work/ReleaseDerivedData/Build/Products/Release/MyPlayer.app" "$stage/MyPlayer.app"
+for license in LICENSE NOTICE COMMERCIAL-LICENSE.md; do
+    cp "$project_root/$license" "$stage/MyPlayer.app/Contents/Resources/$license"
+done
 xattr -cr "$stage/MyPlayer.app"
 codesign --force --deep --sign - "$stage/MyPlayer.app"
 codesign --verify --deep --strict "$stage/MyPlayer.app"

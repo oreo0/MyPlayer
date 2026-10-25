@@ -1,6 +1,10 @@
 # 用户数据与备份
 
-## 独立数据目录
+## v4.0.20 兼容说明
+
+此开发线已并入正式版命名，但为保留既有记录，继续使用 `com.myplayer.native.beta`、`MyPlayer Beta/` 及云端 `MyPlayer/Beta/Backup/` 命名空间。不要因名称中包含 Beta 而删除或手动合并目录。下文旧“正式版”指早期 `MyPlayer/` 数据来源，旧“测试版”目录也是当前版本继续使用的目录。
+
+## 原有独立数据目录
 
 - 正式版：`~/Library/Application Support/MyPlayer/`
 - 测试版：`~/Library/Application Support/MyPlayer Beta/`

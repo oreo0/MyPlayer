@@ -75,74 +75,175 @@ final class PlaybackAppearance: ObservableObject {
     }
 }
 
+/// Hide the native toolbar and its accessories together. Fullscreen presentation
+/// also hides the separate native fullscreen host, preserving SwiftUI ownership.
 struct PlaybackToolbarPresentation: NSViewRepresentable {
     let toolbarVisible: Bool
     var controlsVisible = true
     var reduceMotion = false
     var hideWindowChrome = false
     func makeNSView(context: Context) -> AppearanceView { AppearanceView() }
-    func updateNSView(_ view: AppearanceView, context: Context) { view.toolbarVisible = toolbarVisible; view.controlsVisible = controlsVisible; view.reduceMotion = reduceMotion; view.hideWindowChrome = hideWindowChrome; view.apply() }
-    static func dismantleNSView(_ view: AppearanceView, coordinator: ()) {
-        view.restore()
+    func updateNSView(_ view: AppearanceView, context: Context) {
+        view.configure(playback: !toolbarVisible, hidden: hideWindowChrome || (!toolbarVisible && !controlsVisible))
     }
-    final class AppearanceView: NSView {
-        var hideWindowChrome = false
-        var controlsVisible = true
-        var reduceMotion = false
-        private var forcedChromeHidden = false
-        private var appliedVisibility: Bool?
-        private var visibilityTask: Task<Void, Never>?
-        var toolbarVisible = true
-        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); apply() }
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-        func restore() {
-            visibilityTask?.cancel()
-            for item in window?.toolbar?.items ?? [] { item.isHidden = false }
-            window?.titleVisibility = .visible
-            for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                window?.standardWindowButton(kind)?.isHidden = false
-            }
-        }
-        func apply() {
-            let visibility: NSWindow.TitleVisibility = toolbarVisible ? .visible : .hidden
-            if window?.titleVisibility != visibility { window?.titleVisibility = visibility }
-            if let window, window.titlebarSeparatorStyle != .none { window.titlebarSeparatorStyle = .none }
-            for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                if let button = window?.standardWindowButton(kind), button.isHidden != hideWindowChrome { button.isHidden = hideWindowChrome }
-            }
-            if hideWindowChrome {
-                forcedChromeHidden = true
-                if let window, !window.styleMask.contains(.fullSizeContentView) { window.styleMask.insert(.fullSizeContentView) }
-                if window?.toolbar?.isVisible == true { window?.toolbar?.isVisible = false }
-            } else if forcedChromeHidden {
-                forcedChromeHidden = false
-                window?.toolbar?.isVisible = true
-            }
-            let visible = controlsVisible
-            if window?.toolbar != nil && appliedVisibility != visible {
-                appliedVisibility = visible
-                visibilityTask?.cancel()
-                if visible {
-                    for item in window?.toolbar?.items ?? [] { if item.isHidden { item.isHidden = false } }
-                }
-                visibilityTask = Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    if !visible && !self.reduceMotion {
-                        do { try await Task.sleep(for: .milliseconds(210)) } catch { return }
-                    } else { await Task.yield() }
-                    guard !Task.isCancelled, self.controlsVisible == visible else { return }
-                    // Hide the NSToolbarItem itself: its native glass/bezel is outside
-                    // the SwiftUI label's opacity. The toolbar remains installed.
-                    for item in self.window?.toolbar?.items ?? [] {
-                        if item.isHidden == visible { item.isHidden = !visible }
-                    }
-                    self.visibilityTask = nil
-                }
-            } else if !visible && visibilityTask == nil {
-                for item in window?.toolbar?.items ?? [] where !item.isHidden { item.isHidden = true }
-            }
+    static func dismantleNSView(_ view: AppearanceView, coordinator: ()) { view.restore() }
 
+    final class AppearanceView: NSView {
+        private struct Configuration: Equatable { var playback = false; var hidden = false }
+        private var configuration = Configuration()
+        private weak var trackedWindow: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+        private var work: DispatchWorkItem?
+        private var settleWork: DispatchWorkItem?
+        private var savedTitle: NSWindow.TitleVisibility?
+        private var savedTransparent: Bool?
+        private var insertedFullSizeContent = false
+        private var buttons: [(NSButton, Bool)] = []
+        private var fullscreenHosts: [(NSWindow, CGFloat, Bool)] = []
+        private var accessories: [(NSTitlebarAccessoryViewController, Bool, Bool, CGFloat)] = []
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard trackedWindow !== window else { return }
+            restore()
+            observers.forEach(NotificationCenter.default.removeObserver); observers.removeAll()
+            trackedWindow = window
+            guard let window else { return }
+            for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification, NSWindow.didBecomeKeyNotification, NSWindow.didChangeScreenNotification] {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.schedule() }
+                })
+            }
+            observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didUpdateNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    // SwiftUI can install a replacement toolbar after a scene update.
+                    // Reconcile only a real visibility mismatch; never poll per frame.
+                    guard let self, self.configuration.hidden, let window = self.window,
+                          window.toolbar?.isVisible != window.styleMask.contains(.fullScreen) || window.titlebarAccessoryViewControllers.contains(where: { !$0.isHidden }) else { return }
+                    self.schedule()
+                }
+            })
+            observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.restoreFullscreenHosts() }
+            })
+            schedule()
         }
+        func configure(playback: Bool, hidden: Bool) {
+            let next = Configuration(playback: playback, hidden: playback && hidden)
+            guard next != configuration else { return }
+            configuration = next
+            schedule()
+        }
+        private func schedule() {
+            work?.cancel(); settleWork?.cancel()
+            let task = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.apply()
+                guard self.configuration.playback else { return }
+                // Fullscreen can move native controls to a new host after layout.
+                // One cancellable settling pass handles that transition without polling.
+                let settled = DispatchWorkItem { [weak self] in self?.apply() }
+                self.settleWork = settled
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: settled)
+            }
+            work = task
+            DispatchQueue.main.async(execute: task)
+        }
+        /// Also called synchronously by native-window regression tests.
+        func apply() {
+            guard let window = trackedWindow ?? window else { return }
+            guard configuration.playback else { restore(); return }
+            let frame = window.frame
+            defer {
+                if !window.styleMask.contains(.fullScreen), window.frame != frame { window.setFrame(frame, display: false) }
+            }
+            if savedTitle == nil {
+                savedTitle = window.titleVisibility
+                savedTransparent = window.titlebarAppearsTransparent
+                buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { kind in
+                    window.standardWindowButton(kind).map { ($0, $0.isHidden) }
+                }
+            }
+            window.titleVisibility = .hidden
+            if !window.titlebarAppearsTransparent { window.titlebarAppearsTransparent = true }
+            if window.titlebarSeparatorStyle != .none { window.titlebarSeparatorStyle = .none }
+            if !window.styleMask.contains(.fullSizeContentView) {
+                insertedFullSizeContent = true
+                window.styleMask.insert(.fullSizeContentView)
+            }
+            for (button, originalHidden) in buttons {
+                let hidden = configuration.hidden || originalHidden
+                if button.isHidden != hidden { button.isHidden = hidden }
+            }
+            if configuration.hidden {
+                for controller in window.titlebarAccessoryViewControllers {
+                    if !accessories.contains(where: { $0.0 === controller }) {
+                        accessories.append((controller, controller.isHidden, controller.view.isHidden, controller.fullScreenMinHeight))
+                    }
+                    if controller.fullScreenMinHeight != 0 { controller.fullScreenMinHeight = 0 }
+                    // Hiding just the NSView leaves the accessory host and its background.
+                    // The controller API collapses that host to zero height.
+                    if !controller.isHidden { controller.isHidden = true }
+                }
+                if let toolbar = window.toolbar {
+                    // Preserve the fullscreen host and hide it as a whole below.
+                    // Collapsing its toolbar leaves a separately drawn titlebar strip.
+                    let keepForFullscreenHost = window.styleMask.contains(.fullScreen)
+                    if toolbar.isVisible != keepForFullscreenHost { toolbar.isVisible = keepForFullscreenHost }
+                }
+            } else {
+                restoreToolbar(in: window)
+            }
+            if configuration.hidden && window.styleMask.contains(.fullScreen) {
+                let candidates = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { window.standardWindowButton($0)?.window } + window.titlebarAccessoryViewControllers.compactMap { $0.view.window }
+                hideFullscreenHosts(candidates, excluding: window)
+            } else { restoreFullscreenHosts() }
+        }
+        /// Hosts are resolved only through this window's native controls/accessories.
+        /// Never hide the playback window itself or unrelated application windows.
+        func hideFullscreenHosts(_ candidates: [NSWindow], excluding window: NSWindow) {
+            for host in candidates where host !== window {
+                if !fullscreenHosts.contains(where: { $0.0 === host }) { fullscreenHosts.append((host, host.alphaValue, host.ignoresMouseEvents)) }
+                if host.alphaValue != 0 { host.alphaValue = 0 }
+                if !host.ignoresMouseEvents { host.ignoresMouseEvents = true }
+            }
+        }
+        private func restoreFullscreenHosts() {
+            for (host, alpha, ignoresMouse) in fullscreenHosts {
+                host.alphaValue = alpha; host.ignoresMouseEvents = ignoresMouse
+            }
+            fullscreenHosts.removeAll()
+        }
+        private func restoreToolbar(in window: NSWindow) {
+            if window.toolbar?.isVisible == false { window.toolbar?.isVisible = true }
+            for (controller, hidden, viewHidden, height) in accessories {
+                controller.fullScreenMinHeight = height
+                controller.isHidden = hidden
+                controller.view.isHidden = viewHidden
+            }
+            accessories.removeAll()
+        }
+        func restore() {
+            work?.cancel(); work = nil
+            settleWork?.cancel(); settleWork = nil
+            guard let window = trackedWindow ?? window else { return }
+            restoreFullscreenHosts()
+            let frame = window.frame
+            defer {
+                if !window.styleMask.contains(.fullScreen), window.frame != frame { window.setFrame(frame, display: false) }
+            }
+            restoreToolbar(in: window)
+            if let savedTitle { window.titleVisibility = savedTitle }
+            if let savedTransparent { window.titlebarAppearsTransparent = savedTransparent }
+            for (button, hidden) in buttons { button.isHidden = hidden }
+            if insertedFullSizeContent && !window.styleMask.contains(.fullScreen) {
+                window.styleMask.remove(.fullSizeContentView)
+                insertedFullSizeContent = false
+            }
+            buttons.removeAll(); savedTitle = nil; savedTransparent = nil
+        }
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
     }
 }
 

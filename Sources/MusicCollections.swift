@@ -32,6 +32,7 @@ extension FocusedValues {
 }
 
 struct CollectionsView: View {
+    @ObservedObject var scrollMemory: ScrollPositionMemory
     @EnvironmentObject private var player: PlayerManager
     @EnvironmentObject private var store: CollectionStore
     let isActive: Bool
@@ -52,7 +53,7 @@ struct CollectionsView: View {
     var body: some View {
         ScrollViewReader { proxy in
         HStack(spacing: 0) {
-                List(selection: $selected) {
+                List(selection: Binding(get: { selected }, set: { scrollMemory.suspend(); selected = $0 })) {
                     ForEach(store.collections) { item in
                         Label(item.name, systemImage: "rectangle.stack").tag(item.id)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -74,6 +75,7 @@ struct CollectionsView: View {
                     CollectionPanelHeading(title: "我的合集").padding(.bottom, 24)
                 }
                 .frame(width: CollectionSidebarMetrics.width(available: availableWidth, preferred: sidebarWidth > 0 ? sidebarWidth : savedSidebarWidth))
+                .background(RetainedScrollPosition(memory: scrollMemory, key: "collections.sidebar", active: isActive))
                 .accessibilityIdentifier("collections.sidebar")
             PanelResizeHandle(width: Binding(
                 get: { CollectionSidebarMetrics.width(available: availableWidth, preferred: sidebarWidth > 0 ? sidebarWidth : savedSidebarWidth) },
@@ -121,6 +123,7 @@ struct CollectionsView: View {
                     .safeAreaInset(edge: .top, spacing: 0) {
                         CollectionPanelHeading(title: collection.name, subtitle: "\(songs.count) 个文件").padding(.bottom, 24)
                     }
+                    .background(RetainedScrollPosition(memory: scrollMemory, key: "collections.tracks.\(collection.id)", active: isActive))
                     .accessibilityIdentifier("collections.tracks")
                 } else {
                     ContentUnavailableView("选择或创建合集", systemImage: "rectangle.stack", description: Text("使用顶栏的加号创建合集"))
@@ -130,15 +133,20 @@ struct CollectionsView: View {
         }
         .coordinateSpace(name: CollectionHeaderBlur.coordinateSpace)
         .clipped()
+        .onReceive(NotificationCenter.default.publisher(for: .collectionsHome)) { _ in
+            guard isActive else { return }
+            scrollMemory.resetToTop("collections.sidebar")
+            selected = nil; highlightedSong = nil
+        }
         .onReceive(NotificationCenter.default.publisher(for: .locateCurrentMedia)) { _ in
             guard isActive, let song = player.nowPlaying else { return }
             let target = collection?.songIDs.contains(song.id) == true ? collection : store.collections.first { $0.songIDs.contains(song.id) }
             guard let target else { missingCurrent = true; return }
+            scrollMemory.suspend()
             selected = target.id
             highlightedSong = song.id
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(100))
-                guard selected == target.id, highlightedSong == song.id else { return }
+            scrollMemory.afterRestoration(of: "collections.tracks.\(target.id)") {
+                guard isActive, selected == target.id, highlightedSong == song.id else { return }
                 withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo(song.id, anchor: .center) }
             }
         }

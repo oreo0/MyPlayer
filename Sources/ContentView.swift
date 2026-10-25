@@ -33,6 +33,9 @@ enum MediaFilter: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @State private var coverBackTitle: String?
+    @State private var libraryPage: MusicPage = .library
+    @StateObject private var libraryScrollMemory = ScrollPositionMemory()
+    @StateObject private var collectionScrollMemory = ScrollPositionMemory()
     @FocusedValue(\.collectionActions) private var collectionActions
     private func shows(_ feature: ToolbarFeature) -> Bool { true }
     @AppStorage("showLibraryLyrics") private var showLibraryLyrics = true
@@ -94,7 +97,7 @@ struct ContentView: View {
     @State private var page: MusicPage? = .library
     @State private var search = ""
     @State private var windowWidth: CGFloat = 1240
-    @State private var searchExpanded = false
+    @State private var searchExpanded = true
     @FocusState private var searchFocused: Bool
     @AppStorage("lyricsArtworkBackground") private var lyricsArtworkBackground = false
     @State private var menuBarController: MenuBarLyricsController?
@@ -132,17 +135,17 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .myPlayerNavigate)) { event in
             switch event.object as? String {
-            case "library": page = .library; mediaFilter = .all; search = ""; showQueue = false
+            case "library": selectTab(.library)
             case "queue": setQueueVisible(true); controlsOverride = true
-            case "collections": page = .collections
-            case "playing": page = .playing
+            case "collections": selectTab(.collections)
+            case "playing": selectTab(.playing)
             default: break
             }
         }
         .onChange(of: showMenuBarLyrics) { _, visible in menuBarController?.setVisible(visible) }
-        .onChange(of: player.nowPlaying?.id) { _, _ in if player.isVideo { page = .playing } }
-        .onChange(of: player.isVideo, initial: true) { _, video in if video { page = .playing } }
-        .onChange(of: page) { _, value in controlsOverride = nil; videoHideTask?.cancel(); if value == .playing { showVideoControls() } }
+        .onChange(of: player.nowPlaying?.id) { _, _ in if player.isVideo { selectTab(.playing) } }
+        .onChange(of: player.isVideo, initial: true) { _, video in if video { selectTab(.playing) } }
+        .onChange(of: page) { _, value in if let value, value == .library || value == .favorites { libraryPage = value }; controlsOverride = nil; videoHideTask?.cancel(); if value == .playing { showVideoControls() } }
         .onDisappear { videoHideTask?.cancel() }
     }
     private var windowContent: some View {
@@ -153,7 +156,7 @@ struct ContentView: View {
                 let playing = page == .playing
                 let panelWidth = self.panelWidth(geometry.size.width)
                 let width = playing ? geometry.size.width * (2.0 / 3.0) : max(1, panelWidth - 32)
-                NativePlayerBar(player: player, isActive: playerBarPresented, showPlaying: { page = .playing }, queueVisible: showQueue, toggleQueue: { setQueueVisible(!showQueue) }, showThumbnail: page != .playing || (!splitView && showsLyrics) || player.isVideo || !hasArtwork, compact: !playing, videoFullScreen: windowIsFullScreen)
+                NativePlayerBar(player: player, isActive: playerBarPresented, showPlaying: { selectTab(.playing) }, queueVisible: showQueue, toggleQueue: { setQueueVisible(!showQueue) }, showThumbnail: page != .playing || (!splitView && showsLyrics) || player.isVideo || !hasArtwork, compact: !playing, videoFullScreen: windowIsFullScreen)
                     .environment(\.colorScheme, playing ? playingScheme : sidebarScheme)
                     .environment(\.playbackAccent, playing ? playingAccent : sidebarAccent)
                     .tint(playing ? effectiveAccent : (sidebarAccent ?? effectiveAccent))
@@ -174,13 +177,13 @@ struct ContentView: View {
                     }
             }
         }
-        .toolbar(page == .playing && !barVisible ? .hidden : .visible, for: .windowToolbar)
+        .toolbar(page == .playing && !barVisible && !windowIsFullScreen ? .hidden : .visible, for: .windowToolbar)
         .tint(effectiveAccent)
         .accentColor(effectiveAccent)
         .environment(\.playbackAccent, page == .playing ? playingAccent : (followsMedia ? playbackAppearance.accent : nil))
         .environment(\.ambientArtworkColors, sidebarAppearance.ambientColors)
-        .environment(\.colorScheme, applicationScheme)
-        .preferredColorScheme(applicationScheme)
+        .environment(\.colorScheme, page == .playing ? playingScheme : applicationScheme)
+        .preferredColorScheme(page == .playing ? playingScheme : applicationScheme)
         .toolbarColorScheme(page == .playing ? playingScheme : applicationScheme, for: .windowToolbar)
         .background(PlaybackToolbarPresentation(toolbarVisible: page != .playing, controlsVisible: barVisible, reduceMotion: reduceMotion, hideWindowChrome: page == .playing && !barVisible))
         .task(id: "sidebar-\(artworkRevision)-\(applicationScheme)") {
@@ -200,7 +203,6 @@ struct ContentView: View {
             activePointerInside = inside
             if inside { if controlsOverride != false { showVideoControls() } } else { videoHideTask?.cancel() }
         })
-        .background(FullscreenToolbarTransparency(enabled: page == .playing).frame(width: 0, height: 0))
         .background(SeekKeyboard(player: player).frame(width: 0, height: 0))
         .overlay(alignment: .topLeading) {
             if let activity = player.libraryActivity, page != .playing {
@@ -218,14 +220,16 @@ struct ContentView: View {
         NavigationStack {
             GeometryReader { geometry in
                 ZStack {
-                    if page != .playing {
                     HStack(spacing: 0) {
                         ZStack {
-                            if page == .collections {
-                                CollectionsView(isActive: true, bottomClearance: 12)
-                            } else {
-                                NativeLibrary(page: page == .favorites ? .favorites : .library, search: search, mediaFilter: mediaFilter, bottomClearance: 12, isActive: true)
-                            }
+                            NativeLibrary(scrollMemory: libraryScrollMemory, page: libraryPage, search: search, mediaFilter: mediaFilter, bottomClearance: 12, isActive: page != .playing && page != .collections)
+                                .opacity(page == .collections ? 0 : 1)
+                                .allowsHitTesting(page != .collections && page != .playing)
+                                .accessibilityHidden(page == .collections || page == .playing)
+                            CollectionsView(scrollMemory: collectionScrollMemory, isActive: page == .collections, bottomClearance: 12)
+                                .opacity(page == .collections ? 1 : 0)
+                                .allowsHitTesting(page == .collections)
+                                .accessibilityHidden(page != .collections)
                         }
                         .frame(minWidth: min(450, geometry.size.width), maxWidth: .infinity, maxHeight: .infinity)
                         if geometry.size.width >= 850 && (showLibraryLyrics || showQueue) {
@@ -260,7 +264,7 @@ struct ContentView: View {
                     .opacity(page == .playing ? 0 : 1)
                     .allowsHitTesting(page != .playing)
                     .accessibilityHidden(page == .playing)
-                    } else {
+                    if page == .playing {
                     NativeNowPlaying(player: player, showsLyrics: showsLyrics, splitView: splitView, isActive: page == .playing, hasArtwork: hasArtwork, chromeVisible: barVisible, coverTopClearance: 84, coverBottomClearance: playerBarHeight + 36)
                             .environment(\.colorScheme, playingScheme)
                             .ignoresSafeArea(.container, edges: .top)
@@ -300,14 +304,13 @@ struct ContentView: View {
                         .modifier(ToolbarControlVisibility(visible: barVisible, reduceMotion: reduceMotion))
                     }
                     Button("资料库", systemImage: "music.note.house") {
-                        mediaFilter = .all; search = ""; searchExpanded = false; page = .library
-                        NotificationCenter.default.post(name: Notification.Name("MyPlayer.resetCoverBrowsing"), object: nil)
+                        selectTab(.library)
                     }
-                    .labelStyle(.iconOnly).help("资料库：清除所有筛选")
+                    .labelStyle(.iconOnly).help("资料库")
                     .modifier(ToolbarTabHighlight(selected: page == .library || page == .favorites, accent: effectiveAccent))
                     .foregroundStyle(toolbarForeground)
                     .modifier(ToolbarControlVisibility(visible: barVisible, reduceMotion: reduceMotion))
-                    Button("合集", systemImage: "rectangle.stack") { page = .collections }
+                    Button("合集", systemImage: "rectangle.stack") { selectTab(.collections) }
                         .labelStyle(.iconOnly).help("合集")
                         .modifier(ToolbarTabHighlight(selected: page == .collections, accent: effectiveAccent))
                         .foregroundStyle(toolbarForeground)
@@ -317,24 +320,24 @@ struct ContentView: View {
                 ToolbarItem(placement: .navigation) {
                     if shows(.playing) { playingEntry.foregroundStyle(toolbarForeground).environment(\.colorScheme, page == .playing ? playingScheme : applicationScheme).modifier(ToolbarControlVisibility(visible: barVisible, reduceMotion: reduceMotion)) }
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
-                ToolbarSpacer(.fixed)
-                ToolbarItemGroup {
+                ToolbarSpacer(.flexible, placement: .primaryAction)
+                ToolbarItemGroup(placement: .primaryAction) {
                     if page != .playing { toolbarControls { libraryToolbarControls } }
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
-                ToolbarSpacer(.fixed)
-                ToolbarItemGroup {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+                ToolbarItemGroup(placement: .primaryAction) {
                     if page == .collections || page == .library || page == .favorites || page == nil { toolbarControls { collectionToolbarControls } }
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
-                ToolbarSpacer(.fixed)
-                ToolbarItemGroup {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+                ToolbarItemGroup(placement: .primaryAction) {
                     if page == .playing && shows(.lyricTiming) { toolbarControls { lyricTimingControls } }
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
-                ToolbarSpacer(.fixed)
-                ToolbarItemGroup {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+                ToolbarItemGroup(placement: .primaryAction) {
                     toolbarControls { displayToolbarControls }
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
-                ToolbarSpacer(.fixed)
-                ToolbarItem(id: "search") {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+                ToolbarItem(id: "search", placement: .primaryAction) {
                     if shows(.search) { searchControl.foregroundStyle(toolbarForeground).tint(toolbarForeground).environment(\.colorScheme, page == .playing ? playingScheme : applicationScheme).modifier(ToolbarControlVisibility(visible: barVisible, reduceMotion: reduceMotion)) }
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
             }
@@ -348,6 +351,22 @@ struct ContentView: View {
             .foregroundStyle(toolbarForeground)
             .environment(\.colorScheme, page == .playing ? playingScheme : applicationScheme)
             .modifier(ToolbarControlVisibility(visible: barVisible, reduceMotion: reduceMotion))
+    }
+
+    private func selectTab(_ target: MusicPage) {
+        switch TabNavigation.action(from: page, to: target) {
+        case .activate(let destination):
+            let next = destination == .library ? libraryPage : destination
+            guard next != page else { return }
+            libraryScrollMemory.suspend(); collectionScrollMemory.suspend()
+            page = next
+        case .libraryHome:
+            libraryScrollMemory.resetToTop("covers:library:\(coverGroupingRaw):root")
+            libraryPage = .library; page = .library; mediaFilter = .all; search = ""
+            NotificationCenter.default.post(name: .libraryHome, object: nil)
+        case .collectionsHome:
+            NotificationCenter.default.post(name: .collectionsHome, object: nil)
+        }
     }
 
     private func panelResizeHandle(windowWidth: CGFloat, overlay: Bool) -> some View {
@@ -385,7 +404,7 @@ struct ContentView: View {
         }
     }
     private var playingEntry: some View {
-        Button { page = .playing } label: {
+        Button { selectTab(.playing) } label: {
             HStack(spacing: 8) {
                 Image(systemName: "waveform")
                     .symbolEffect(.variableColor.iterative, options: .repeating, isActive: player.isPlaying && !reduceMotion)
@@ -524,7 +543,7 @@ struct ContentView: View {
         }
     }
     private var searchControl: some View {
-        let expanded = windowWidth >= 1100 || searchExpanded
+        let expanded = searchExpanded
         return HStack(spacing: 6) {
             Button {
                 withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { searchExpanded.toggle() }
@@ -555,6 +574,8 @@ struct ContentView: View {
 }
 
 private struct NativeLibrary: View {
+    @ObservedObject var scrollMemory: ScrollPositionMemory
+    private var coverScrollKey: String { "covers:\(page.rawValue):\(coverGroupingRaw):\(coverGroupID ?? "root")" }
     @AppStorage("coverSortAscending") private var coverSortAscending = true
     @AppStorage("coverGrouping") private var coverGroupingRaw = "album"
     @State private var coverGroupID: String?
@@ -664,12 +685,12 @@ private struct NativeLibrary: View {
                 .onChange(of: sortOrder) { _, value in
                     if page != .queue { player.sortLibrary(using: value) }
                 }
-                .focusedValue(\.libraryActions, LibraryActions(
+                .focusedValue(\.libraryActions, isActive ? LibraryActions(
                     selectAll: { selection = Set(songs.map(\.id)) },
                     remove: removeSelection,
                     addToQueue: { for song in songs where selection.contains(song.id) { player.enqueue(song) } },
-                    hasSelection: !selection.isEmpty))
-                .onDeleteCommand { if ShortcutStore.shared.binding(.removeSelected) == ShortcutAction.removeSelected.standard { removeSelection() } }
+                    hasSelection: !selection.isEmpty) : nil)
+                .onDeleteCommand { if isActive && ShortcutStore.shared.binding(.removeSelected) == ShortcutAction.removeSelected.standard { removeSelection() } }
                 .scrollContentBackground(.hidden)
                 .alternatingRowBackgrounds(.disabled)
                 .background(TableTransparency(bottomInset: bottomClearance, selectionIDs: selection, locateRow: locateRow, locateRequest: locateRequest))
@@ -693,13 +714,26 @@ private struct NativeLibrary: View {
                 }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryHome)) { _ in
+            guard isActive else { return }
+            scrollMemory.resetToTop("covers:\(page.rawValue):\(coverGroupingRaw):root")
+            coverGroupID = nil; selection.removeAll()
+            if viewStyle != "covers", !songs.isEmpty { locateRow = 0; locateRequest = UUID() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .locateCurrentMedia)) { _ in
             guard isActive, let song = player.nowPlaying else { return }
             selection = [song.id]
-            if viewStyle == "covers" { coverGroupID = coverGroups.first { $0.songs.contains(where: { $0.id == song.id }) }?.id }
+            if viewStyle == "covers" { scrollMemory.suspend(); coverGroupID = coverGroups.first { $0.songs.contains(where: { $0.id == song.id }) }?.id }
             locateRow = songs.firstIndex { $0.id == song.id }
             locateRequest = UUID()
-            DispatchQueue.main.async { withAnimation(.smooth(duration: 0.25)) { scrollProxy.scrollTo(song.id, anchor: .center) } }
+            if viewStyle == "covers" {
+                scrollMemory.afterRestoration(of: coverScrollKey) {
+                    guard isActive else { return }
+                    withAnimation(.smooth(duration: 0.25)) { scrollProxy.scrollTo(song.id, anchor: .center) }
+                }
+            } else {
+                DispatchQueue.main.async { withAnimation(.smooth(duration: 0.25)) { scrollProxy.scrollTo(song.id, anchor: .center) } }
+            }
         }
         }
         .onAppear { refreshCoverCatalog(); publishCoverNavigation() }
@@ -712,7 +746,7 @@ private struct NativeLibrary: View {
         .onChange(of: coverGroupingRaw) { _, _ in refreshCoverCatalog() }
         .onChange(of: coverSortAscending) { _, _ in refreshCoverCatalog() }
         .onReceive(player.$library.dropFirst()) { _ in DispatchQueue.main.async { refreshCoverCatalog() } }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MyPlayer.resetCoverBrowsing"))) { _ in coverGroupID = nil; selection.removeAll() }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MyPlayer.resetCoverBrowsing"))) { _ in scrollMemory.suspend(); coverGroupID = nil; selection.removeAll() }
         .sheet(item: $editingSong) { MediaInfoEditor(song: $0).environmentObject(player) }
         .onChange(of: creatingCollection) { _, presented in
             guard presented else { return }; creatingCollection = false
@@ -736,8 +770,9 @@ private struct NativeLibrary: View {
                 if currentCoverGroup == nil {
                     ForEach(coverGroups) { group in
                         coverGroupCard(group)
+                            .id(group.id)
                             .contentShape(Rectangle())
-                            .onTapGesture { coverGroupID = group.id; selection.removeAll() }
+                            .onTapGesture { scrollMemory.suspend(); coverGroupID = group.id; selection.removeAll() }
                             .contextMenu {
                                 if group.kind == .artist {
                                     Button("设置艺人照片…", systemImage: "photo") {
@@ -779,6 +814,7 @@ private struct NativeLibrary: View {
                 }
                 }
             }.padding(12).padding(.bottom, bottomClearance)
+                .background(RetainedScrollPosition(memory: scrollMemory, key: coverScrollKey, active: isActive))
         }
         // Keep the scrolling viewport below the native toolbar and the group
         // heading. A separate blur overlay must not cover the first card rows.
@@ -786,8 +822,8 @@ private struct NativeLibrary: View {
         .clipped()
         .onScrollPhaseChange { _, phase in gridScrolling = phase != .idle }
         .focusable().focused($gridFocused).focusEffectDisabled()
-        .focusedValue(\.libraryActions, LibraryActions(selectAll: { selection = Set(coverSongs.map(\.id)) }, remove: removeSelection, addToQueue: { for song in coverSongs where selection.contains(song.id) { player.enqueue(song) } }, hasSelection: !selection.isEmpty))
-        .onDeleteCommand { if ShortcutStore.shared.binding(.removeSelected) == ShortcutAction.removeSelected.standard { removeSelection() } }
+        .focusedValue(\.libraryActions, isActive ? LibraryActions(selectAll: { selection = Set(coverSongs.map(\.id)) }, remove: removeSelection, addToQueue: { for song in coverSongs where selection.contains(song.id) { player.enqueue(song) } }, hasSelection: !selection.isEmpty) : nil)
+        .onDeleteCommand { if isActive && ShortcutStore.shared.binding(.removeSelected) == ShortcutAction.removeSelected.standard { removeSelection() } }
         }
         .clipped()
         .onChange(of: coverGroupingRaw) { _, _ in coverGroupID = nil; selection.removeAll() }
@@ -826,6 +862,7 @@ private struct NativeLibrary: View {
         } else { selection = [song.id]; selectionAnchor = song.id }
     }
     private func removeSelection() {
+        guard isActive else { return }
         let items = songs.filter { selection.contains($0.id) }
         guard !items.isEmpty else { return }
         let scope = page

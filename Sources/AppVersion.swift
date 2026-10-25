@@ -2,8 +2,7 @@ import Foundation
 
 enum AppVersion {
     static var version: String {
-        let build = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0
-        return String(format: "4.0 (%02d)", build)
+        "v" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "4.0.20")
     }
     static var name: String { "MyPlayer" }
 }

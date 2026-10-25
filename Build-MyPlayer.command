@@ -6,6 +6,8 @@ if ! command -v xcodebuild >/dev/null; then
     exit 1
 fi
 bash Tests/run_build36.sh
+bash Tests/run_navigation19.sh
+bash Tests/run_toolbar18.sh
 bash Tests/run_build39.sh
 bash Tests/run_build44.sh
 bash package_app.sh

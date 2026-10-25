@@ -7,7 +7,6 @@ import AppKit
 struct MyPlayerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var session = MyPlayerSession()
-    @ObservedObject private var cloudData = CloudDataController.shared
     @ObservedObject private var userData = UserDataStore.shared
     @State private var showShortcuts = false
     @AppStorage("themeColorName") private var themeName = ThemeColor.system.rawValue
@@ -252,7 +251,7 @@ struct PlayerMenus: Commands {
             Picker("主题色", selection: $theme) {
                 ForEach(ThemeColor.allCases) { color in Text(color.label).tag(color.rawValue) }
             }
-            Picker("测试版光效", selection: $betaVisualStyle) {
+            Picker("背景光效", selection: $betaVisualStyle) {
                 Text("极光流动").tag("aurora")
                 Text("柔和光晕").tag("halo")
                 Text("关闭光效").tag("off")
