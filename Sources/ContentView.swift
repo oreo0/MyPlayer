@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVKit
+import UniformTypeIdentifiers
 
 enum MusicPage: String, CaseIterable, Identifiable {
     case library, favorites, queue, playing, collections
@@ -26,7 +27,7 @@ enum MusicPage: String, CaseIterable, Identifiable {
 }
 
 enum MediaFilter: String, CaseIterable, Identifiable {
-    case all = "全部", audio = "文件", video = "视频"
+    case all = "全部", audio = "歌曲", video = "视频"
     var id: String { rawValue }
     func includes(_ song: Song) -> Bool { self == .all || (self == .video ? song.isVideo : !song.isVideo) }
 }
@@ -36,19 +37,19 @@ struct ContentView: View {
     @State private var libraryPage: MusicPage = .library
     @StateObject private var libraryScrollMemory = ScrollPositionMemory()
     @StateObject private var collectionScrollMemory = ScrollPositionMemory()
-    @FocusedValue(\.collectionActions) private var collectionActions
     private func shows(_ feature: ToolbarFeature) -> Bool { true }
     @AppStorage("showLibraryLyrics") private var showLibraryLyrics = true
     @AppStorage("coverSortAscending") private var coverSortAscending = true
     @AppStorage("coverGrouping") private var coverGroupingRaw = "album"
     @AppStorage("libraryViewStyle") private var libraryViewStyle = "list"
-    @AppStorage("themeColorName") private var themeName = "system"
-    private var followsMedia: Bool { themeName == ThemeColor.media.rawValue }
+    private let themeName = "media"
+    private let followsMedia = true
     private var effectiveAccent: Color {
-        if followsMedia || page == .playing { return (page == .playing ? playingAccent : playbackAppearance.accent) ?? ThemeColor.current.color ?? Color(nsColor: .controlAccentColor) }
+        if followsMedia || page == .playing { return (page == .playing ? playingAccent : (hasArtwork ? sidebarAppearance.accent : playbackAppearance.accent)) ?? ThemeColor.current.color ?? Color(nsColor: .controlAccentColor) }
         return ThemeColor.current.color ?? Color(nsColor: .controlAccentColor)
     }
     @State private var showQueue = false
+    @State private var nativeTopInset: CGFloat = 0
     @State private var sidePanelWidth: CGFloat = 0
     @AppStorage("sidePanelPreferredWidth") private var savedPanelWidth = 0.0
     private func panelWidth(_ width: CGFloat, overlay: Bool = false) -> CGFloat {
@@ -60,6 +61,8 @@ struct ContentView: View {
         withTransaction(transaction) { showQueue = visible }
     }
 
+    private let interaction = InteractionActivity.shared
+    @State private var heldChrome: Bool?
     @State private var controlsOverride: Bool?
     @State private var activePointerInside = false
     @State private var windowIsFullScreen = false
@@ -69,6 +72,7 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var barVisible: Bool {
         if page != .playing { return true }
+        if let heldChrome { return heldChrome }
         if let controlsOverride { return controlsOverride }
         return activePointerInside && videoControlsVisible
     }
@@ -86,7 +90,7 @@ struct ContentView: View {
     private var usesCoverBackdrop: Bool { hasArtwork && !player.isVideo && lyricsArtworkBackground }
     private var sidebarScheme: ColorScheme { lyricsArtworkBackground && hasArtwork ? sidebarAppearance.scheme : applicationScheme }
     private var sidebarAccent: Color? { lyricsArtworkBackground && hasArtwork ? (sidebarAppearance.accent ?? effectiveAccent) : effectiveAccent }
-    private var playingAccent: Color? { usesCoverBackdrop ? sidebarAppearance.accent : playbackAppearance.accent }
+    private var playingAccent: Color? { hasArtwork ? sidebarAppearance.accent : playbackAppearance.accent }
     private var playingScheme: ColorScheme { usesCoverBackdrop ? sidebarAppearance.scheme : (!player.isVideo && !usesCoverBackdrop ? applicationScheme : playbackAppearance.scheme) }
     private var toolbarForeground: Color {
         guard page == .playing else { return .primary }
@@ -146,7 +150,13 @@ struct ContentView: View {
         .onChange(of: player.nowPlaying?.id) { _, _ in if player.isVideo { selectTab(.playing) } }
         .onChange(of: player.isVideo, initial: true) { _, video in if video { selectTab(.playing) } }
         .onChange(of: page) { _, value in if let value, value == .library || value == .favorites { libraryPage = value }; controlsOverride = nil; videoHideTask?.cancel(); if value == .playing { showVideoControls() } }
+        .onReceive(interaction.$isTrackingMenu.combineLatest(interaction.$isEditingMetadata).map { $0 || $1 }.removeDuplicates()) { holding in
+            guard page == .playing else { return }
+            if holding { heldChrome = barVisible; videoHideTask?.cancel() }
+            else { heldChrome = nil; if page == .playing { showVideoControls() } }
+        }
         .onDisappear { videoHideTask?.cancel() }
+        .focusedSceneValue(\.lyricsSizeContext, page == .playing ? (windowIsFullScreen ? .fullscreen : .windowed) : .sidebar)
     }
     private var windowContent: some View {
         navigationContent
@@ -190,7 +200,7 @@ struct ContentView: View {
             await sidebarAppearance.update(player.nowPlaying?.artworkData, fallback: applicationScheme)
         }
         .task(id: appearanceTaskKey) {
-            await playbackAppearance.observe(song: player.nowPlaying, video: player.videoPlayer, active: player.isVideo || page == .playing || followsMedia, darkLyrics: (showsLyrics || splitView) && usesCoverBackdrop, defaultScheme: !player.isVideo && (page != .playing || !usesCoverBackdrop) ? applicationScheme : nil, shouldSample: { followsMedia || (page == .playing && barVisible) })
+            await playbackAppearance.observe(song: player.nowPlaying, video: player.videoPlayer, active: player.isVideo || page == .playing || followsMedia, darkLyrics: (showsLyrics || splitView) && usesCoverBackdrop, defaultScheme: !player.isVideo && (page != .playing || !usesCoverBackdrop) ? applicationScheme : nil, shouldSample: { !interaction.holdsAutoHide && !hasArtwork && (followsMedia || (page == .playing && barVisible)) })
         }
         .ignoresSafeArea(.container, edges: page == .playing ? .top : [])
         .background { if page == .playing && player.isVideo { Color.black.ignoresSafeArea() } }
@@ -204,6 +214,7 @@ struct ContentView: View {
             if inside { if controlsOverride != false { showVideoControls() } } else { videoHideTask?.cancel() }
         })
         .background(SeekKeyboard(player: player).frame(width: 0, height: 0))
+        .background(WindowContentTopInset { nativeTopInset = $0 })
         .overlay(alignment: .topLeading) {
             if let activity = player.libraryActivity, page != .playing {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text(activity).font(.caption) }
@@ -264,25 +275,27 @@ struct ContentView: View {
                     .opacity(page == .playing ? 0 : 1)
                     .allowsHitTesting(page != .playing)
                     .accessibilityHidden(page == .playing)
-                    if page == .playing {
                     NativeNowPlaying(player: player, showsLyrics: showsLyrics, splitView: splitView, isActive: page == .playing, hasArtwork: hasArtwork, chromeVisible: barVisible, coverTopClearance: 84, coverBottomClearance: playerBarHeight + 36)
+                            .environment(\.lyricsSizeContext, windowIsFullScreen ? .fullscreen : .windowed)
                             .environment(\.colorScheme, playingScheme)
                             .ignoresSafeArea(.container, edges: .top)
                             .opacity(page == .playing ? 1 : 0)
                             .allowsHitTesting(page == .playing)
                             .accessibilityHidden(page != .playing)
-                    }
                     if showQueue && (page == .playing || geometry.size.width < 850) {
                         HStack(spacing: 0) {
                             Spacer(minLength: 0)
                             QueuePanel(player: player, bottomClearance: page == .playing ? playerBarHeight + 28 : 12) { setQueueVisible(false) }
-                                .frame(width: self.panelWidth(geometry.size.width, overlay: true))
-                                .overlay(alignment: .leading) { panelResizeHandle(windowWidth: geometry.size.width, overlay: true) }
-                                .background(.regularMaterial, in: .rect(cornerRadius: SurfaceCorners.panel))
-                            .clipShape(.rect(cornerRadius: SurfaceCorners.panel))
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .padding(8)
+                                .background(.regularMaterial, in: .rect(cornerRadius: SurfaceCorners.panel))
+                                .clipShape(.rect(cornerRadius: SurfaceCorners.panel))
+                                .padding(8)
+                                .frame(width: self.panelWidth(geometry.size.width))
+                                .overlay(alignment: .leading) { panelResizeHandle(windowWidth: geometry.size.width, overlay: false) }
                         }
-                        .environment(\.colorScheme, page == .playing ? playingScheme : applicationScheme)
+                        .padding(.top, page == .playing ? nativeTopInset : 0)
+                        .environment(\.colorScheme, applicationScheme)
                         .opacity(page == .playing && !barVisible ? 0 : 1)
                         .allowsHitTesting(page != .playing || barVisible)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -330,7 +343,7 @@ struct ContentView: View {
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
                 ToolbarSpacer(.fixed, placement: .primaryAction)
                 ToolbarItemGroup(placement: .primaryAction) {
-                    if page == .playing && shows(.lyricTiming) { toolbarControls { lyricTimingControls } }
+                    // Timing adjustments remain available in the Lyrics menu.
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
                 ToolbarSpacer(.fixed, placement: .primaryAction)
                 ToolbarItemGroup(placement: .primaryAction) {
@@ -338,7 +351,7 @@ struct ContentView: View {
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
                 ToolbarSpacer(.fixed, placement: .primaryAction)
                 ToolbarItem(id: "search", placement: .primaryAction) {
-                    if shows(.search) { searchControl.foregroundStyle(toolbarForeground).tint(toolbarForeground).environment(\.colorScheme, page == .playing ? playingScheme : applicationScheme).modifier(ToolbarControlVisibility(visible: barVisible, reduceMotion: reduceMotion)) }
+                    if page != .playing && shows(.search) { searchControl.foregroundStyle(toolbarForeground).tint(toolbarForeground).environment(\.colorScheme, page == .playing ? playingScheme : applicationScheme).modifier(ToolbarControlVisibility(visible: barVisible, reduceMotion: reduceMotion)) }
                 }.sharedBackgroundVisibility(page == .playing && windowIsFullScreen ? .hidden : (barVisible ? .automatic : .hidden))
             }
         }
@@ -380,7 +393,9 @@ struct ContentView: View {
         return "\(page == .playing)-\(player.nowPlaying?.id.uuidString ?? "none")-\(artworkRevision)-\(showsLyrics)-\(splitView)-\(lyricsArtworkBackground)-\(applicationScheme)-\(themeName)"
     }
     private func toggleCanvasControls(_ point: CGPoint) -> Bool {
+        guard !interaction.holdsAutoHide else { return false }
         guard page == .playing else { return false }
+        if let window = NSApp.currentEvent?.window ?? NSApp.keyWindow, !window.styleMask.contains(.fullScreen), ResizeBoundary.contains(point, in: CGRect(origin: .zero, size: window.frame.size)) { return false }
         let actualWidth = NSApp.keyWindow?.contentView?.bounds.width ?? windowWidth
         if showQueue && barVisible && point.x > actualWidth - panelWidth(actualWidth, overlay: true) { return false }
         let reveal = !barVisible
@@ -390,6 +405,7 @@ struct ContentView: View {
         return true
     }
     private func showVideoControls() {
+        guard !interaction.holdsAutoHide else { videoHideTask?.cancel(); return }
         guard page == .playing, activePointerInside else { return }
         controlsOverride = nil
         videoControlsVisible = true
@@ -397,7 +413,7 @@ struct ContentView: View {
         videoHideTask = Task { @MainActor in
             do {
                 try await Task.sleep(for: .seconds(3))
-                guard !Task.isCancelled, page == .playing, activePointerInside else { return }
+                guard !Task.isCancelled, page == .playing, activePointerInside, !interaction.holdsAutoHide else { return }
                 controlsOverride = nil
                 videoControlsVisible = false
             } catch { }
@@ -409,14 +425,14 @@ struct ContentView: View {
                 Image(systemName: "waveform")
                     .symbolEffect(.variableColor.iterative, options: .repeating, isActive: player.isPlaying && !reduceMotion)
                     .layoutPriority(1)
-                AdaptiveToolbarSongTitle(text: player.nowPlaying?.title ?? "未在播放", active: barVisible && activePointerInside,
+                AdaptiveToolbarSongTitle(text: NowPlayingTabTitle.text(for: player.nowPlaying), active: barVisible,
                     color: page == .playing ? (playingScheme == .light ? .black : .white) : .labelColor)
                     .layoutPriority(-1)
             }
         }
         .modifier(ToolbarTabHighlight(selected: page == .playing, accent: effectiveAccent))
-        .accessibilityLabel("正在播放：" + (player.nowPlaying?.title ?? "未在播放"))
-        .help(player.nowPlaying?.title ?? "未在播放")
+        .accessibilityLabel("正在播放：" + NowPlayingTabTitle.text(for: player.nowPlaying))
+        .help(NowPlayingTabTitle.text(for: player.nowPlaying))
     }
     @ViewBuilder private var libraryToolbarControls: some View {
         if (page == .library || page == .favorites || page == .collections) && shows(.locate) {
@@ -426,8 +442,7 @@ struct ContentView: View {
             }.disabled(player.nowPlaying == nil).help("定位并选中当前播放的文件或视频")
         }
         if page == .collections && shows(.play) {
-            Button("播放全部", systemImage: "play.fill") { collectionActions?.play() }
-                .disabled(collectionActions?.canPlay != true)
+            CollectionToolbarControls(kind: .play)
         }
                     if page != .playing && page != .collections && shows(.play) {
                         Button("播放", systemImage: "play.fill") {
@@ -486,15 +501,7 @@ struct ContentView: View {
     }
     @ViewBuilder private var collectionToolbarControls: some View {
         if page == .collections {
-            ControlGroup {
-            Button { collectionActions?.create() } label: { ToolbarGlyph(symbol: "plus", title: "新建合集") }.help("新建合集")
-            Menu {
-                    Button("重命名合集…", systemImage: "pencil") { collectionActions?.rename() }
-                    Button("删除合集", systemImage: "trash", role: .destructive) { collectionActions?.delete() }
-            } label: { ToolbarGlyph(symbol: "ellipsis.circle", title: "合集管理") }
-                .help("合集管理")
-                .disabled(collectionActions?.hasSelection != true)
-            }.controlGroupStyle(.navigation)
+            CollectionToolbarControls(kind: .management)
         }
                     if (page == .library || page == .favorites || page == nil) && shows(.filter) {
                         Menu {
@@ -537,8 +544,8 @@ struct ContentView: View {
         if page != .playing {
             menuLyricsControl
                         if shows(.sideLyrics) { Button { withAnimation(.smooth(duration: 0.25)) { showLibraryLyrics.toggle() } } label: {
-                            Label(showLibraryLyrics ? "收起右侧歌词栏" : "展开右侧歌词栏", systemImage: "sidebar.right")
-                        }.help(showLibraryLyrics ? "收起右侧歌词栏" : "展开右侧歌词栏")
+                            Label("侧边歌词", systemImage: "sidebar.right")
+                        }.help(showLibraryLyrics ? "收起侧边歌词" : "展开侧边歌词")
                         }
         }
     }
@@ -735,6 +742,10 @@ private struct NativeLibrary: View {
                 DispatchQueue.main.async { withAnimation(.smooth(duration: 0.25)) { scrollProxy.scrollTo(song.id, anchor: .center) } }
             }
         }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            guard isActive, page != .queue else { return false }
+            return FileDropImporter.receive(providers) { player.importDroppedMedia($0) }
         }
         .onAppear { refreshCoverCatalog(); publishCoverNavigation() }
         .onChange(of: coverGroupID) { _, _ in publishCoverNavigation() }

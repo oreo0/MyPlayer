@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import PhotosUI
 
 extension Notification.Name {
     static let locateCurrentMedia = Notification.Name("MyPlayer.locateCurrentMedia")
@@ -23,6 +24,16 @@ struct MediaInfoEditor: View {
     @State private var album: String
     @State private var artwork: Data?
     @State private var imageError = false
+    @State private var editorID = UUID()
+    @State private var playbackContinuity: MetadataPlaybackContinuity?
+    @State private var showFilePicker = false
+    @State private var showPhotosPicker = false
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var loadingArtwork = false
+    @State private var artworkTask: Task<Void, Never>?
+    @State private var saving = false
+    @State private var saveError: String?
+    @State private var showSaveError = false
     init(song: Song) {
         self.song = song
         _title = State(initialValue: song.title)
@@ -40,38 +51,68 @@ struct MediaInfoEditor: View {
                     } else { Image(systemName: "opticaldisc").font(.system(size: 54)).foregroundStyle(.secondary) }
                 }.frame(width: 120, height: 120)
                 VStack(alignment: .leading) {
-                    Button("选择专辑封面…", action: chooseArtwork)
+                    Menu("选择专辑封面…") {
+                        Button("从访达选择…") { showFilePicker = true }
+                        Button("从照片选择…") { showPhotosPicker = true }
+                    }
+                    if loadingArtwork { ProgressView().controlSize(.small) }
                     Button("移除封面") { RemovalConfirmation.request("移除封面？", message: "保存信息后，该文件将不再使用当前封面。") { artwork = nil } }.disabled(artwork == nil)
                 }
             }
             Form {
-                TextField("文件名", text: $title)
+                TextField("标题", text: $title)
                 TextField("艺人名", text: $artist)
                 TextField("专辑名", text: $album)
             }
-            Text("信息保存到 MyPlayer 资料库。").font(.caption).foregroundStyle(.secondary)
+            Text("信息与封面将写入源文件，并按“标题 - 艺人”重命名。原文件会先保存在本机备份文件夹。").font(.caption).foregroundStyle(.secondary)
             HStack {
+                if saving { ProgressView().controlSize(.small); Text("正在保存源文件…").font(.caption) }
                 Spacer()
                 Button("取消") { dismiss() }.buttonStyle(.glass).keyboardShortcut(.cancelAction)
                 Button("保存") {
-                    player.editMetadata(song, title: title, artist: artist, album: album, artwork: artwork)
-                    dismiss()
-                }.buttonStyle(.glassProminent).keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    saving = true
+                    Task {
+                        do { try await player.editSourceMetadata(song, title: title, artist: artist, album: album, artwork: artwork); dismiss() }
+                        catch { saveError = error.localizedDescription; showSaveError = true }
+                        saving = false
+                    }
+                }.buttonStyle(.glassProminent).keyboardShortcut(.defaultAction).disabled(loadingArtwork || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-        }.padding(24).frame(width: 460)
+        }.disabled(saving).padding(24).frame(width: 500)
+        .onAppear {
+            InteractionActivity.shared.editing(editorID, began: true)
+            playbackContinuity = MetadataPlaybackContinuity(player: player)
+        }
+        .onDisappear {
+            playbackContinuity?.invalidate(); playbackContinuity = nil
+            artworkTask?.cancel(); InteractionActivity.shared.editing(editorID, began: false)
+        }
+        .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.image], allowsMultipleSelection: false) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            artworkTask?.cancel(); loadingArtwork = true
+            artworkTask = Task {
+                defer { loadingArtwork = false }
+                do { let loaded = try await CoverImageImport.file(url); guard !Task.isCancelled else { return }; artwork = loaded }
+                catch { if !Task.isCancelled { imageError = true } }
+            }
+        }
+        .photosPicker(isPresented: $showPhotosPicker, selection: $selectedPhoto, matching: .images, preferredItemEncoding: .current)
+        .task(id: selectedPhoto) {
+            guard let selectedPhoto else { return }
+            loadingArtwork = true; defer { loadingArtwork = false }
+            do {
+                guard let data = try await selectedPhoto.loadTransferable(type: Data.self) else { imageError = true; return }
+                let loaded = try await CoverImageImport.photo(data)
+                guard !Task.isCancelled else { return }; artwork = loaded
+            } catch { if !Task.isCancelled { imageError = true } }
+        }
+        .interactiveDismissDisabled(saving)
         .presentationSizing(.fitted)
         .presentationBackground(.regularMaterial)
         .nativeDialog("无法读取该图片，请选择有效的图片文件。", isPresented: $imageError)
+        .nativeDialog(saveError ?? "保存失败。", isPresented: $showSaveError)
     }
-    private func chooseArtwork() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let data = try? Data(contentsOf: url), let image = ArtworkRendering.thumbnail(data, maximum: 1024),
-              let encoded = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { imageError = true; return }
-        artwork = encoded
-    }
+
 }
 
 /// Extend scrolling content beneath the header, fading the real backdrop into it.

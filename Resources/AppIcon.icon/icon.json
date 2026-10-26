@@ -1,0 +1,79 @@
+{
+  "features" : [
+    "refractivity"
+  ],
+  "fill" : "system-light",
+  "groups" : [
+    {
+      "blend-mode-specializations" : [
+        {
+          "appearance" : "tinted",
+          "value" : "normal"
+        }
+      ],
+      "blur-material" : 0.5,
+      "hidden-specializations" : [
+        {
+          "idiom" : "macOS",
+          "value" : true
+        }
+      ],
+      "layers" : [
+        {
+          "image-name" : "GlassRim.svg",
+          "name" : "GlassRim"
+        }
+      ],
+      "lighting" : "combined",
+      "name" : "Glass Rim",
+      "opacity-specializations" : [
+        {
+          "appearance" : "tinted",
+          "value" : 1
+        }
+      ],
+      "refractivity" : {
+        "depth" : 0,
+        "enabled" : true,
+        "strength" : 0.4271484375
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : "system-light"
+            }
+          ],
+          "glass" : true,
+          "image-name" : "Record.svg",
+          "name" : "Record"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

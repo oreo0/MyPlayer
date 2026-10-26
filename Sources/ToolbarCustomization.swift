@@ -25,7 +25,7 @@ enum ToolbarFeature: String, CaseIterable {
         case .menuLyrics: "菜单栏歌词"
         case .filter: "筛选"
         case .view: "视图"
-        case .sideLyrics: "右侧歌词栏"
+        case .sideLyrics: "侧边歌词"
         case .search: "搜索"
         }
     }

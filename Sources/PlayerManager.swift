@@ -20,6 +20,7 @@ final class PlayerManager: NSObject, ObservableObject {
     private let userData: UserDataStore
     private var libraryByIDCache: [UUID: Song]?
     private var sortedCache: [Song]?
+    private var columnSortRules: [LibrarySortRule] = []
     @Published private(set) var library: [Song] = [] { didSet { sortedCache = nil; libraryByIDCache = nil } }
     @Published private(set) var nowPlaying: Song?
     @Published private(set) var isPlaying = false
@@ -48,10 +49,10 @@ final class PlayerManager: NSObject, ObservableObject {
     }
     @Published private(set) var usesCustomLibraryOrder = false
     @Published var sortKey: SortKey = .title {
-        didSet { sortedCache = nil; userData.defaults.set(sortKey.rawValue, forKey: "sortKey") }
+        didSet { sortedCache = nil; userData.defaults.set(sortKey.rawValue, forKey: "sortKey"); resetColumnSort() }
     }
     @Published var sortAscending: Bool = true {
-        didSet { sortedCache = nil; userData.defaults.set(sortAscending, forKey: "sortAscending") }
+        didSet { sortedCache = nil; userData.defaults.set(sortAscending, forKey: "sortAscending"); resetColumnSort() }
     }
 
     var queuedSongs: [Song] { songs(for: upNext) }
@@ -116,8 +117,12 @@ final class PlayerManager: NSObject, ObservableObject {
 
     /// 排序后的资料库（中文按拼音首字母 A→Z）
     var sortedLibrary: [Song] {
-        if usesCustomLibraryOrder { return library }
         if let sortedCache { return sortedCache }
+        if usesCustomLibraryOrder {
+            let rules = columnSortRules.isEmpty ? LibrarySortRule.infer(library) : columnSortRules
+            let result = StableMediaOrder.sorted(library, using: rules.map(\.comparator), identity: { $0.id.uuidString })
+            sortedCache = result; return result
+        }
         let result = library.sorted { a, b in
             let result: ComparisonResult
             switch sortKey {
@@ -158,9 +163,12 @@ final class PlayerManager: NSObject, ObservableObject {
     private var countedThisPlay = false
     private var lastElapsedReport: TimeInterval = -1
 
+    private var loopSeekToken: UUID?
     private var restoringSession: PlaybackSession?
     private var lastCheckpoint = Date.distantPast
     private var lastSavedSong: Song?
+    private var sourceMetadataWrites = Set<UUID>()
+    private var metadataEdits: [UUID: UUID] = [:]
 
     /// 当前播放的是否为视频
     var videoPlayer: AVPlayer? { nowPlaying?.isVideo == true ? mediaPlayer : nil }
@@ -177,7 +185,11 @@ final class PlayerManager: NSObject, ObservableObject {
         sortKey = SortKey(rawValue: d.string(forKey: "sortKey") ?? "") ?? .title
         sortAscending = d.object(forKey: "sortAscending") as? Bool ?? true
         usesCustomLibraryOrder = d.bool(forKey: "usesCustomLibraryOrder")
+        columnSortRules = LibrarySortRule.load(d)
         loadLibrary()
+        if usesCustomLibraryOrder && columnSortRules.isEmpty {
+            columnSortRules = LibrarySortRule.infer(library); persistColumnSort()
+        }
         if startsServices { initializeFolderScanning() }
         scanForNewLyrics()
         if startsServices { setupRemoteCommands() }
@@ -224,6 +236,8 @@ final class PlayerManager: NSObject, ObservableObject {
     func importAudioFiles() {
         FileImporter.pickAudioFiles { [weak self] urls in self?.enqueueMedia(.importing(urls, folders: false)) }
     }
+
+    func importDroppedMedia(_ urls: [URL]) { enqueueMedia(.importing(urls.filter(\.isFileURL), folders: false)) }
 
     func importAudioFolder() {
         FileImporter.pickAudioFolder { [weak self] urls in self?.enqueueMedia(.importing(urls, folders: true)) }
@@ -460,16 +474,64 @@ final class PlayerManager: NSObject, ObservableObject {
         if nowPlaying?.id == song.id { updateNowPlayingInfo(force: true) }
     }
 
+    var sourceFileBackupRoot: URL {
+        userData.root.deletingLastPathComponent().appendingPathComponent(".MyPlayer Source File Backups", isDirectory: true)
+    }
+
+    /// Only an explicit save in the editor writes the source file. Automatic matches remain library-only.
+    func editSourceMetadata(_ song: Song, title: String, artist: String, album: String, artwork: Data?) async throws {
+        guard let original = library.first(where: { $0.id == song.id }), original.path == song.path,
+              sourceMetadataWrites.insert(song.id).inserted else { throw SourceMediaError.changed }
+        defer { sourceMetadataWrites.remove(song.id) }
+        metadataEdits[song.id] = UUID()
+        let metadata = SourceMediaMetadata(title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                                           artist: artist.trimmingCharacters(in: .whitespacesAndNewlines),
+                                           album: album.trimmingCharacters(in: .whitespacesAndNewlines), artwork: artwork)
+        let lyricsPath = original.lyricsPath ?? original.autoTimedTextURL?.path
+        let result = try await SourceMediaEditor.write(original.url, metadata: metadata, backupRoot: sourceFileBackupRoot)
+        guard library.contains(where: { $0.id == song.id }) else { throw SourceMediaError.invalid("该项目已从资料库移除。源文件已保存于：\(result.url.path)") }
+        let wasCurrent = nowPlaying?.id == song.id
+        let session = wasCurrent ? PlaybackSession(songID: song.id, path: result.url.path, seconds: currentTime,
+                                                   wasPlaying: isPlaying, countedThisPlay: countedThisPlay, contextIDs: sessionPlaybackIDs) : nil
+        updateSong(original) {
+            $0.path = result.url.path; $0.title = metadata.title; $0.artist = metadata.artist; $0.album = metadata.album
+            $0.artworkData = metadata.artwork; $0.lyricsPath = lyricsPath
+        }
+        scanCatalog.exclude(original.url); scanCatalog.allowExplicitFile(result.url); saveScanCatalog()
+        SongLibraryCache.existing?.removeValue(forKey: original.path)
+        if let updated = library.first(where: { $0.id == song.id }) {
+            SongLibraryCache.existing?[updated.path] = updated
+            if let session {
+                // Persist the renamed path before the asynchronous playback restoration completes.
+                UserDataFiles.save(updated, to: userData.file("last-playing-song.json"))
+                UserDataFiles.save(session, to: userData.file("playback-session.json"))
+                lastSavedSong = updated
+                restoringSession = session; startPlayback(updated)
+                updateNowPlayingInfo(force: true)
+            }
+        }
+    }
+
     // MARK: 播放列表（下一首）
 
+    private func resetColumnSort() {
+        guard !loadingUserData else { return }
+        columnSortRules = []; usesCustomLibraryOrder = false
+        userData.defaults.set(false, forKey: "usesCustomLibraryOrder")
+        userData.defaults.removeObject(forKey: "libraryColumnSort")
+    }
+    private func persistColumnSort() {
+        if let data = try? JSONEncoder().encode(columnSortRules), let text = String(data: data, encoding: .utf8) { userData.defaults.set(text, forKey: "libraryColumnSort") }
+    }
     func sortLibrary(using comparators: [KeyPathComparator<Song>]) {
         guard !comparators.isEmpty else { return }
+        columnSortRules = comparators.compactMap(LibrarySortRule.init)
+        persistColumnSort(); sortedCache = nil
         let ordered = StableMediaOrder.sorted(library, using: comparators, identity: { $0.id.uuidString })
-        guard !usesCustomLibraryOrder || ordered.map(\.id) != library.map(\.id) else { return }
-        library = ordered
+        let changed = !usesCustomLibraryOrder || ordered.map(\.id) != library.map(\.id)
         usesCustomLibraryOrder = true
         userData.defaults.set(true, forKey: "usesCustomLibraryOrder")
-        saveLibrary()
+        if changed { library = ordered; saveLibrary() }
     }
 
     func enqueue(_ song: Song) {
@@ -603,9 +665,9 @@ final class PlayerManager: NSObject, ObservableObject {
             }
         }
         videoRateObserver = player.observe(\.rate, options: [.new]) { [weak self] observed, _ in
-            let playing = observed.rate != 0
             Task { @MainActor [weak self] in
-                guard let self, self.mediaPlayer === observed, self.restoringSession == nil else { return }
+                guard let self, self.mediaPlayer === observed, self.restoringSession == nil, self.loopSeekToken == nil else { return }
+                let playing = observed.rate != 0
                 if self.isPlaying != playing {
                     self.isPlaying = playing
                     self.updateNowPlayingInfo(force: true)
@@ -666,6 +728,7 @@ final class PlayerManager: NSObject, ObservableObject {
     }
 
     private func teardownVideoEngine() {
+        loopSeekToken = nil
         videoStatusObserver = nil
         videoRateObserver = nil
         if let observer = videoTimeObserver {
@@ -680,7 +743,16 @@ final class PlayerManager: NSObject, ObservableObject {
         mediaPlayer = nil
     }
 
+    func resumeAfterMetadataSheet(engine: AVPlayer, rate: Float) {
+        guard mediaPlayer === engine, !userPaused, engine.rate == 0 else { return }
+        engine.rate = rate
+    }
+
     func togglePlayPause() {
+        if loopSeekToken != nil {
+            loopSeekToken = nil; mediaPlayer?.pause(); isPlaying = false; userPaused = true
+            updateNowPlayingInfo(force: true); return
+        }
         if let mediaPlayer {
             if mediaPlayer.rate != 0 {
                 mediaPlayer.pause()
@@ -699,6 +771,7 @@ final class PlayerManager: NSObject, ObservableObject {
     }
 
     func seek(to time: TimeInterval) {
+        loopSeekToken = nil
         if let mediaPlayer {
             let clamped = max(0, min(time, duration))
             if let resume = restoringSession {
@@ -723,7 +796,7 @@ final class PlayerManager: NSObject, ObservableObject {
             updateNowPlayingInfo(force: true)
             return
         case .replay:
-            if let current = nowPlaying { play(current) }
+            replayCurrentItem()
             return
         case .advance: break
         }
@@ -732,6 +805,23 @@ final class PlayerManager: NSObject, ObservableObject {
             if let song = library.first(where: { $0.id == id }) { play(song); return }
         }
         advance(offset: 1, wrap: manual || repeatMode == .repeatAll)
+    }
+
+    /// Loop in place so the native video renderer never loses its player/item.
+    private func replayCurrentItem() {
+        guard let engine = mediaPlayer, let item = engine.currentItem, let song = nowPlaying else { return }
+        let token = UUID(); loopSeekToken = token
+        engine.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak engine, weak item] finished in
+            Task { @MainActor in
+                guard let self, self.loopSeekToken == token, let engine, let item,
+                      self.mediaPlayer === engine, engine.currentItem === item, self.nowPlaying?.id == song.id else { return }
+                self.loopSeekToken = nil
+                guard finished else { return }
+                self.currentTime = 0; self.countedThisPlay = false; self.userPaused = false
+                engine.play(); self.isPlaying = true
+                self.updateNowPlayingInfo(force: true)
+            }
+        }
     }
 
     func playPrevious() {
@@ -834,9 +924,11 @@ final class PlayerManager: NSObject, ObservableObject {
         let needsLyric = song.lyricsPath == nil && !hasLocalLrc && !song.lyricsDisabled
         guard needsCover || needsArtist || needsAlbum || needsLyric else { return }
 
+        guard !sourceMetadataWrites.contains(song.id) else { return }
+        let edit = metadataEdits[song.id]
         let generation = userDataGeneration
         let info = await MetadataMatcher.match(title: song.title, artist: song.artist)
-        guard generation == userDataGeneration, let info,
+        guard generation == userDataGeneration, metadataEdits[song.id] == edit, !sourceMetadataWrites.contains(song.id), let info,
               let current = library.first(where: { $0.id == song.id }),
               current.title == song.title,
               current.artist.isEmpty || current.artist == song.artist else { return }
@@ -1018,7 +1110,7 @@ final class PlayerManager: NSObject, ObservableObject {
 
     /// 视频播放进度回调（AVPlayer 周期观察者）
     private func videoTick(_ seconds: TimeInterval) {
-        guard restoringSession == nil, let song = nowPlaying, mediaPlayer != nil else { return }
+        guard restoringSession == nil, loopSeekToken == nil, let song = nowPlaying, mediaPlayer != nil else { return }
         let playing = (mediaPlayer?.rate ?? 0) != 0
         if isPlaying != playing { isPlaying = playing }
         currentTime = max(0, seconds)
@@ -1126,11 +1218,14 @@ final class PlayerManager: NSObject, ObservableObject {
         }
         if names.contains("Lyrics"), let song = nowPlaying { loadLyrics(for: song) }
         if names.contains("preferences.plist") {
+            let wasLoading = loadingUserData; loadingUserData = true
+            defer { loadingUserData = wasLoading }
             let d = userData.defaults
             repeatMode = RepeatMode(rawValue: d.string(forKey: "repeatMode") ?? "") ?? .repeatAll
             sortKey = SortKey(rawValue: d.string(forKey: "sortKey") ?? "") ?? .title
             sortAscending = d.object(forKey: "sortAscending") as? Bool ?? true
             usesCustomLibraryOrder = d.bool(forKey: "usesCustomLibraryOrder")
+            columnSortRules = LibrarySortRule.load(d); sortedCache = nil
             autoScanFolders = d.object(forKey: "autoScanFolders") as? Bool ?? true
         }
     }

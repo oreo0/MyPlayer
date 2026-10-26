@@ -9,7 +9,6 @@ struct MyPlayerApp: App {
     @StateObject private var session = MyPlayerSession()
     @ObservedObject private var userData = UserDataStore.shared
     @State private var showShortcuts = false
-    @AppStorage("themeColorName") private var themeName = ThemeColor.system.rawValue
 
     var body: some Scene {
         Window(AppVersion.name, id: "main") {
@@ -22,18 +21,10 @@ struct MyPlayerApp: App {
                 .onAppear { appDelegate.player = player; appDelegate.collections = collections; appDelegate.hideFormatMenu() }
                 .sheet(isPresented: $showShortcuts) { ShortcutEditorView() }
                 .nativeDialog("用户数据未能应用", isPresented: Binding(get: { userData.issue != nil }, set: { if !$0 { userData.issue = nil } }), message: userData.issue ?? "")
-                .tint(ThemeColor(rawValue: themeName)?.color)
-                .accentColor(ThemeColor(rawValue: themeName)?.color)
             } else {
                 VStack(spacing: 16) {
-                    if let error = session.error {
-                        Text("暂时无法恢复云端数据").font(.headline)
-                        Text(error).foregroundStyle(.secondary)
-                        Button("重试") { Task { await session.load() } }
-                    } else {
-                        ProgressView()
-                        Text("正在准备用户数据…")
-                    }
+                    ProgressView()
+                    Text("正在读取本机资料库…")
                 }.padding(32).frame(minWidth: 480, minHeight: 240)
             }
             }.task { await session.load() }
@@ -45,14 +36,11 @@ struct MyPlayerApp: App {
 
 private struct MyPlayerCommands: Commands {
     @ObservedObject var session: MyPlayerSession
-    @ObservedObject private var cloudData = CloudDataController.shared
     @Binding var showShortcuts: Bool
     var body: some Commands {
             CommandGroup(replacing: .appInfo) {
                 Button("关于 MyPlayer") {
-                    let dark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
-                    let url = Bundle.main.url(forResource: dark ? "AppIcon-dark" : "AppIcon-light", withExtension: "png")
-                    let image = url.flatMap(NSImage.init(contentsOf:)) ?? NSImage(named: NSImage.applicationIconName) ?? NSImage()
+                    let image = NSImage(named: NSImage.applicationIconName) ?? NSImage()
                     NSApp.orderFrontStandardAboutPanel(options: [.applicationName: AppVersion.name, .applicationVersion: AppVersion.version, .version: "", .applicationIcon: image])
                 }
             }
@@ -66,6 +54,11 @@ private struct MyPlayerCommands: Commands {
                     player.importAudioFiles()
                 }
                 .appShortcut(.importFiles)
+                Button("打开源文件备份文件夹") {
+                    let root = player.sourceFileBackupRoot
+                    do { try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true); NSWorkspace.shared.open(root) }
+                    catch { player.libraryImportMessage = error.localizedDescription }
+                }
                 Button("导入文件夹…") {
                     player.importAudioFolder()
                 }
@@ -96,13 +89,7 @@ private struct MyPlayerCommands: Commands {
                     Button("导入文件夹…") {}.disabled(true)
                     Text("正在准备用户数据…")
                 }
-                Divider()
-                Menu("iCloud Drive") {
-                    Text(cloudData.status)
-                    Button("立即备份用户数据") { Task { await cloudData.syncNow() } }
-                    Button("打开云端备份文件夹") { cloudData.openFolder() }
-                    Text("音乐、视频原文件保留原位置")
-                }
+
             }
 
         if let player = session.player { PlayerMenus(player: player) }
@@ -114,8 +101,6 @@ private struct MyPlayerCommands: Commands {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var player: PlayerManager?
     weak var collections: CollectionStore?
-    private var systemIconObserver: NSObjectProtocol?
-    private var lastIconResource: String?
     private var windowLifecycle: MainWindowLifecycle?
 
     @MainActor func bindWindow(_ window: NSWindow) {
@@ -136,17 +121,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyAppearance()
-        applyIconForCurrentAppearance()
-        DispatchQueue.main.async { self.hideFormatMenu() }
+        hideFormatMenu()
 
         // 设置里的外观模式变化
         UserDefaults.standard.addObserver(self,
                                           forKeyPath: "appearanceMode",
                                           options: [.new],
                                           context: nil)
-        systemIconObserver = DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applyIconForCurrentAppearance() }
-        }
+
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -155,11 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         player?.flushLibrarySaves()
         collections?.flush()
         UserDataStore.shared.flush()
-        Task { @MainActor in
-            await CloudDataController.shared.syncNow()
-            sender.reply(toApplicationShouldTerminate: true)
-        }
-        return .terminateLater
+        return .terminateNow
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -169,7 +147,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         collections?.flush()
         UserDataStore.shared.flush()
         UserDefaults.standard.removeObserver(self, forKeyPath: "appearanceMode")
-        if let systemIconObserver { DistributedNotificationCenter.default().removeObserver(systemIconObserver) }
     }
 
     override func observeValue(forKeyPath keyPath: String?,
@@ -182,11 +159,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func hideFormatMenu() {
+        MainActor.assumeIsolated { AppearanceMenuNaming.shared.install() }
         // Hide only this unused top-level menu once, never delete items while
         // the user is tracking a menu (the old source of menu flashing).
         for item in NSApp.mainMenu?.items ?? [] {
             if ["Format", "格式"].contains(item.title) { item.isHidden = true }
-            if ["View", "显示"].contains(item.title) { item.title = "外观" }
         }
     }
 
@@ -202,18 +179,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 根据系统外观切换亮色/深色图标
-    private func applyIconForCurrentAppearance() {
-        let isDark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
-        let resource = isDark ? "AppIcon-dark" : "AppIcon-light"
-        guard lastIconResource != resource else { return }
-        lastIconResource = resource
-        if let url = Bundle.main.url(forResource: resource, withExtension: "png"),
-           let image = NSImage(contentsOf: url) {
-            NSApp.applicationIconImage = image
-        }
-    }
-
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         UserDefaults.standard.string(forKey: "closeWindowBehavior") != "background"
     }
@@ -222,13 +187,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct PlayerMenus: Commands {
     @FocusedValue(\.libraryActions) private var libraryActions
     @FocusedValue(\.collectionActions) private var collectionActions
-    @ObservedObject var player: PlayerManager
-    @AppStorage("themeColorName") private var theme = ThemeColor.system.rawValue
+    private let player: PlayerManager
+    @StateObject private var menuUpdates: MenuPlayerObserver
+    init(player: PlayerManager) {
+        self.player = player
+        _menuUpdates = StateObject(wrappedValue: MenuPlayerObserver(player: player))
+    }
     @AppStorage("appearanceMode") private var appearance = "system"
     @AppStorage("betaVisualStyle") private var betaVisualStyle = "aurora"
     @AppStorage("desktopBackdropStyle") private var backdrop = "frosted"
     @AppStorage("lyricsArtworkBackground") private var lyricBackground = false
-    @AppStorage("lyricsFontSize") private var lyricsSize = 28.0
+    @AppStorage("sidebarLyricsFontSize") private var sidebarLyricsSize = 28.0
+    @AppStorage("windowLyricsFontSize") private var windowLyricsSize = 28.0
+    @AppStorage("fullscreenLyricsFontSize") private var fullscreenLyricsSize = 28.0
+    @FocusedValue(\.lyricsSizeContext) private var sizeContext
+    private var currentLyricsSize: Binding<Double> {
+        switch sizeContext ?? .sidebar { case .sidebar: $sidebarLyricsSize; case .windowed: $windowLyricsSize; case .fullscreen: $fullscreenLyricsSize }
+    }
     @AppStorage("lyricsBlurEnabled") private var lyricsBlur = false
     @AppStorage("lyricsCentered") private var lyricsCentered = true
     @AppStorage("showMenuBarLyrics") private var menuLyrics = true
@@ -242,14 +217,14 @@ struct PlayerMenus: Commands {
     @AppStorage("videoLyricsFont") private var videoLyricsFont = "system"
     @AppStorage("closeWindowBehavior") private var closeWindowBehavior = "quit"
     var body: some Commands {
-        CommandGroup(replacing: .toolbar) {
+        let _ = menuUpdates.player
+        CommandMenu("外观") {
+            Button("进入或退出全屏幕") { (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil) }
+            Divider()
             Picker("界面外观", selection: $appearance) {
                 Text("跟随系统").tag("system")
                 Text("浅色").tag("light")
                 Text("深色").tag("dark")
-            }
-            Picker("主题色", selection: $theme) {
-                ForEach(ThemeColor.allCases) { color in Text(color.label).tag(color.rawValue) }
             }
             Picker("背景光效", selection: $betaVisualStyle) {
                 Text("极光流动").tag("aurora")
@@ -268,7 +243,8 @@ struct PlayerMenus: Commands {
             }
         }
         CommandMenu("歌词") {
-            Toggle("右侧歌词栏", isOn: $showLibraryLyrics).appShortcut(.sideLyrics)
+            Toggle("侧边歌词", isOn: $showLibraryLyrics).appShortcut(.sideLyrics)
+            Toggle("菜单栏歌词", isOn: $menuLyrics).appShortcut(.menuLyrics)
             Divider()
                 Button("歌词提前 0.2 秒") { player.adjustLyrics(by: -0.2) }.appShortcut(.lyricEarlier).disabled(player.lyrics.isEmpty)
                 Button("歌词延后 0.2 秒") { player.adjustLyrics(by: 0.2) }.appShortcut(.lyricLater).disabled(player.lyrics.isEmpty)
@@ -276,7 +252,6 @@ struct PlayerMenus: Commands {
             Divider()
             Toggle("歌词模糊", isOn: $lyricsBlur).appShortcut(.lyricBlur)
             Toggle("歌词居中", isOn: $lyricsCentered)
-            Toggle("菜单栏歌词", isOn: $menuLyrics).appShortcut(.menuLyrics)
             Toggle("模糊封面作为背景", isOn: $lyricBackground).appShortcut(.lyricBackground)
             Picker("歌词字体", selection: $lyricsFont) {
                 Text("系统字体").tag("system")
@@ -284,20 +259,11 @@ struct PlayerMenus: Commands {
                     Text(name).tag(name)
                 }
             }
-            Menu("歌词字号：\(Int(lyricsSize))") {
-                Button("增大") { lyricsSize = min(72, lyricsSize + 1) }
-                    .appShortcut(.largerLyrics)
-                    .disabled(lyricsSize >= 72)
-                Button("减小") { lyricsSize = max(28, lyricsSize - 1) }
-                    .appShortcut(.smallerLyrics)
-                    .disabled(lyricsSize <= 28)
-                Divider()
-                ForEach([28, 32, 36, 40, 48, 56, 64, 72], id: \.self) { size in
-                    Button { lyricsSize = Double(size) } label: {
-                        Label("\(size)", systemImage: lyricsSize == Double(size) ? "checkmark" : "")
-                    }
-                }
-            }
+            LyricsFontSizeMenu(context: .sidebar, size: $sidebarLyricsSize)
+            LyricsFontSizeMenu(context: .windowed, size: $windowLyricsSize)
+            LyricsFontSizeMenu(context: .fullscreen, size: $fullscreenLyricsSize)
+            Button("增大当前区域歌词") { currentLyricsSize.wrappedValue = min(72, currentLyricsSize.wrappedValue + 1) }.appShortcut(.largerLyrics)
+            Button("减小当前区域歌词") { currentLyricsSize.wrappedValue = max(28, currentLyricsSize.wrappedValue - 1) }.appShortcut(.smallerLyrics)
             Picker("歌词字重", selection: $lyricsWeight) {
                 ForEach(LyricsWeight.allCases) { weight in Text(weight.label).tag(weight.rawValue) }
             }
@@ -364,7 +330,7 @@ struct PlayerMenus: Commands {
             Button("快退 5 秒") { player.seek(to: player.currentTime - 5) }.appShortcut(.seekBack)
             Button("快进 5 秒") { player.seek(to: player.currentTime + 5) }.appShortcut(.seekForward)
             Divider()
-            Picker("播放模式", selection: $player.repeatMode) {
+            Picker("播放模式", selection: Binding(get: { player.repeatMode }, set: { player.repeatMode = $0 })) {
                 ForEach(RepeatMode.allCases) { mode in Text(mode.label).tag(mode) }
             }
             Button(player.nowPlaying?.isFavorite == true ? "取消喜欢" : "喜欢") {
@@ -396,6 +362,7 @@ private struct MinimalDefaultCommands: Commands {
     }
     @CommandsBuilder private var windows: some Commands {
         CommandGroup(replacing: .sidebar) { }
+        CommandGroup(replacing: .toolbar) { }
         CommandGroup(replacing: .windowSize) { }
         CommandGroup(replacing: .windowList) { }
         CommandGroup(replacing: .singleWindowList) { }

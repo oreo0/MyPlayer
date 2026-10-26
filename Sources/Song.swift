@@ -121,6 +121,7 @@ struct Song: Identifiable, Codable, Hashable {
         guard let preview = try? AVAudioPlayer(contentsOf: url) else { return nil }
         let duration = preview.duration
 
+        let native = url.pathExtension.lowercased() == "flac" ? AudioFileMetadata.read(url) : nil
         let asset = AVURLAsset(url: url)
         let metadata = asset.commonMetadata
         func field(_ key: AVMetadataKey) -> String {
@@ -131,14 +132,14 @@ struct Song: Identifiable, Codable, Hashable {
             .dataValue
 
         let fallbackTitle = url.deletingPathExtension().lastPathComponent
-        let title = field(.commonKeyTitle)
+        let title = native?.title ?? field(.commonKeyTitle)
         var song = Song(
             path: url.path,
             title: title.isEmpty ? fallbackTitle : title,
-            artist: field(.commonKeyArtist),
-            album: albumField(from: metadata),
+            artist: native?.artist ?? field(.commonKeyArtist),
+            album: native?.album ?? albumField(from: metadata),
             duration: duration,
-            artworkData: artwork
+            artworkData: native?.artwork ?? artwork
         )
         song.artist = MetadataText.repaired(song.artist)
         song.album = MetadataText.repaired(song.album)
@@ -170,7 +171,8 @@ struct Song: Identifiable, Codable, Hashable {
             title: title.isEmpty ? fallbackTitle : title,
             artist: field(.commonKeyArtist),
             album: albumField(from: metadata),
-            duration: duration
+            duration: duration,
+            artworkData: metadata.first { $0.commonKey == .commonKeyArtwork }?.dataValue
         )
         song.artist = MetadataText.repaired(song.artist)
         song.album = MetadataText.repaired(song.album)
@@ -186,6 +188,7 @@ struct Song: Identifiable, Codable, Hashable {
 
     private static func albumField(from metadata: [AVMetadataItem]) -> String {
         for item in metadata {
+            if item.commonKey == .commonKeyAlbumName, let value = item.stringValue, !value.isEmpty { return value }
             if let k = item.key as? String,
                k == "TALB" || k == "album" || k == "©alb",
                let v = item.stringValue, !v.isEmpty {

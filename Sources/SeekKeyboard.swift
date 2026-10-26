@@ -20,8 +20,7 @@ struct SeekKeyboard: NSViewRepresentable {
             self.player = player
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self, event.window === self.view?.window,
-                      !(event.window?.firstResponder is NSTextView),
-                      !(event.window?.firstResponder is NSSlider) else { return event }
+                      MainActor.assumeIsolated({ PlaybackKeyboardScope.permitsTransport(in: event.window) }) else { return event }
                 let handled = MainActor.assumeIsolated {
                     guard self.player.nowPlaying != nil else { return false }
                     let store = ShortcutStore.shared

@@ -59,7 +59,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .playPause: return "播放 / 暂停"; case .previous: return "上一首"; case .next: return "下一首"
         case .seekBack: return "快退5秒"; case .seekForward: return "快进5秒"; case .favorite: return "喜欢 / 取消喜欢"
         case .clearQueue: return "清空播放队列"; case .fullScreen: return "视频全屏"; case .pictureInPicture: return "画中画"
-        case .sideLyrics: return "右侧歌词栏"; case .menuLyrics: return "菜单栏歌词"; case .lyricBlur: return "歌词模糊"
+        case .sideLyrics: return "侧边歌词"; case .menuLyrics: return "菜单栏歌词"; case .lyricBlur: return "歌词模糊"
         case .lyricBackground: return "模糊封面作为背景"; case .lyricEarlier: return "歌词提前0.2秒"; case .lyricLater: return "歌词延后0.2秒"
         case .resetOffset: return "重置歌词同步"; case .largerLyrics: return "增大歌词字号"; case .smallerLyrics: return "减小歌词字号"
         case .selectAll: return "全选"; case .addToQueue: return "添加所选到队列"; case .removeSelected: return "移除所选项目"
@@ -169,7 +169,8 @@ final class ShortcutStore: ObservableObject {
 private struct AppShortcut: ViewModifier {
     let action: ShortcutAction
     @ObservedObject private var store = ShortcutStore.shared
-    func body(content: Content) -> some View { content.keyboardShortcut(store.binding(action).shortcut) }
+    @ObservedObject private var editing = MetadataShortcutScope.shared
+    func body(content: Content) -> some View { content.keyboardShortcut(editing.isEditing ? nil : store.binding(action).shortcut) }
 }
 extension View { func appShortcut(_ action: ShortcutAction) -> some View { modifier(AppShortcut(action: action)) } }
 

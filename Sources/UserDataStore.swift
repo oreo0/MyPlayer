@@ -28,10 +28,10 @@ final class UserDataStore: ObservableObject {
     private let names = ["library.json", "collections.json", "folder-scan.json", "preferences.plist", "shortcuts.json", "queue.json", "playback-session.json", "last-playing-song.json"]
     static let preferenceKeys = Set([
         "collectionSidebarPreferredWidth", "betaVisualStyle", "appearanceMode", "closeWindowBehavior", "desktopBackdropStyle", "sidePanelPreferredWidth", "libraryViewStyle", "coverGrouping", "coverSortAscending",
-        "lyricsArtworkBackground", "lyricsBlurEnabled", "lyricsCentered", "lyricsFontName", "lyricsFontSize", "lyricsFontWeight",
-        "nowPlayingShowsLyrics", "nowPlayingSplitView", "showLibraryLyrics", "showMenuBarLyrics", "themeColorName",
+        "lyricsArtworkBackground", "lyricsBlurEnabled", "lyricsCentered", "lyricsFontName", "lyricsFontSize", "sidebarLyricsFontSize", "windowLyricsFontSize", "fullscreenLyricsFontSize", "lyricsFontWeight",
+        "nowPlayingShowsLyrics", "nowPlayingSplitView", "showLibraryLyrics", "showMenuBarLyrics",
         "videoLyricsEnabled", "videoLyricsFont", "videoLyricsSize", "videoLyricsStyle", "videoLyricsWeight",
-        "repeatMode", "sortKey", "sortAscending", "autoScanFolders", "usesCustomLibraryOrder"
+        "libraryColumnSort", "repeatMode", "sortKey", "sortAscending", "autoScanFolders", "usesCustomLibraryOrder"
     ])
     init(root: URL? = nil, defaults: UserDefaults = .standard) {
         self.bootstrapsProduction = root == nil
@@ -55,6 +55,7 @@ final class UserDataStore: ObservableObject {
             // The snapshot above is independent; all subsequent writes stay in beta.
             if FileManager.default.fileExists(atPath: file("preferences.plist").path) { reloadPreferences() }
             else { lastPreferences = preferences(); persistPreferences(force: true) }
+            if LyricsFontSizes.migrate(defaults) { persistPreferences(force: true) }
         } catch { report("无法创建用户数据文件夹：\(error.localizedDescription)") }
         defaultsObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.schedulePreferences() }
@@ -135,7 +136,7 @@ final class UserDataStore: ObservableObject {
                 if isBool && !(value is NSNumber) { throw CocoaError(.propertyListReadCorrupt) }
                 if ["sidePanelPreferredWidth", "collectionSidebarPreferredWidth"].contains(key) {
                     guard let number = value as? NSNumber, number.doubleValue.isFinite, (0...720).contains(number.doubleValue) else { throw CocoaError(.propertyListReadCorrupt) }
-                } else if ["lyricsFontSize", "videoLyricsSize"].contains(key) {
+                } else if ["lyricsFontSize", "sidebarLyricsFontSize", "windowLyricsFontSize", "fullscreenLyricsFontSize", "videoLyricsSize"].contains(key) {
                     guard let number = value as? NSNumber, number.doubleValue.isFinite, (28...72).contains(number.doubleValue) else { throw CocoaError(.propertyListReadCorrupt) }
                 } else if !isBool && !(value is String) { throw CocoaError(.propertyListReadCorrupt) }
             }

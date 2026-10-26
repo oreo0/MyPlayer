@@ -150,11 +150,14 @@ struct NativeLyrics: View {
     var hidesPlayedLines = false
     var onDarkArtwork: Bool = false
     @AppStorage("lyricsBlurEnabled") private var lyricsBlur = false
-    @AppStorage("lyricsFontSize") private var fontSize = 28.0
+    @Environment(\.lyricsSizeContext) private var sizeContext
+    @AppStorage("sidebarLyricsFontSize") private var sidebarSize = 28.0
+    @AppStorage("windowLyricsFontSize") private var windowSize = 28.0
+    @AppStorage("fullscreenLyricsFontSize") private var fullscreenSize = 28.0
+    private var fontSize: Double { switch sizeContext { case .sidebar: sidebarSize; case .windowed: windowSize; case .fullscreen: fullscreenSize } }
     @AppStorage("lyricsCentered") private var centered = true
     @AppStorage("lyricsFontName") private var fontName = "system"
     @AppStorage("lyricsFontWeight") private var fontWeight = "bold"
-    @AppStorage("themeColorName") private var themeName = "system"
     @Environment(\.playbackAccent) private var playbackAccent
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -165,7 +168,7 @@ struct NativeLyrics: View {
 
     private var selectedWeight: Font.Weight { (LyricsWeight(rawValue: fontWeight) ?? .bold).weight }
     private var readableAccent: Color {
-        let accent = playbackAccent ?? ThemeColor(rawValue: themeName)?.color ?? .accentColor
+        let accent = playbackAccent ?? .accentColor
         return LyricContrast.color(accent, background: onDarkArtwork ? 0.32 : colorScheme == .dark ? 0.13 : 0.96)
     }
     var body: some View {

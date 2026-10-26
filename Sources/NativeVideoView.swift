@@ -26,6 +26,7 @@ struct NativeVideoView: NSViewRepresentable {
         let view = AVPlayerView()
         view.updatesNowPlayingInfoCenter = false
         view.controlsStyle = .none
+        view.allowsVideoFrameAnalysis = false
         view.showsFullScreenToggleButton = false
         view.allowsPictureInPicturePlayback = true
         view.pictureInPictureDelegate = VideoPresentation.shared

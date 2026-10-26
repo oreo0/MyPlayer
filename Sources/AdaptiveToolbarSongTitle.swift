@@ -21,8 +21,9 @@ struct AdaptiveToolbarSongTitle: View {
         widths.setObject(NSNumber(value: Double(width)), forKey: key)
         return width
     }
+    static let maximumWidth: CGFloat = 220
     var body: some View {
-        let width = Self.naturalWidth(text)
+        let width = min(Self.maximumWidth, Self.naturalWidth(text))
         ScrollingSongTitle(text: text, isActive: active, textColor: color)
             .frame(minWidth: min(32, width), idealWidth: width, maxWidth: width)
     }
@@ -33,5 +34,14 @@ struct ToolbarTabHighlight: ViewModifier {
     func body(content: Content) -> some View {
         content.background(selected ? accent.opacity(0.18) : .clear, in: Capsule())
             .accessibilityValue(selected ? "已选中" : "未选中")
+    }
+}
+
+/// Use a stable, bounded native marquee for both the title and accessibility text.
+enum NowPlayingTabTitle {
+    static func text(for song: Song?) -> String {
+        guard let song else { return "未在播放" }
+        let artist = song.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        return artist.isEmpty ? song.title : song.title + " - " + artist
     }
 }

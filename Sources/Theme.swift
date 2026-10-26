@@ -51,7 +51,7 @@ enum ThemeColor: String, CaseIterable, Identifiable {
     }
 
     static var current: ThemeColor {
-        ThemeColor(rawValue: UserDefaults.standard.string(forKey: "themeColorName") ?? "") ?? .system
+        .media
     }
 }
 

@@ -10,6 +10,7 @@ struct QueuePanel: View {
     }
     var isActive = true
     @State private var scrolling = false
+    @State private var contentAboveTop = false
     var bottomClearance: CGFloat = 110
     let close: () -> Void
     @State private var editingSong: Song?
@@ -34,7 +35,7 @@ struct QueuePanel: View {
                     .help("关闭播放队列")
             }
             .padding(.horizontal, 12).frame(minHeight: 66)
-            .modifier(ProgressivePanelHeader())
+            .zIndex(1)
             List {
                 ForEach(Array(displayed.enumerated()), id: \.element.id) { index, song in
                     let current = player.nowPlaying?.id == song.id
@@ -66,6 +67,14 @@ struct QueuePanel: View {
                     }
                 }
             }.listStyle(.plain).scrollContentBackground(.hidden)
+                .scrollEdgeEffectHidden()
+                .mask {
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [contentAboveTop ? .clear : .white, .white], startPoint: .top, endPoint: .bottom).frame(height: 28)
+                        Color.white
+                    }
+                }
+                .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y + $0.contentInsets.top > 1 } action: { _, value in contentAboveTop = value }
                 .onScrollPhaseChange { _, phase in scrolling = phase != .idle }
                 
                 .contentMargins(.bottom, bottomClearance, for: .scrollContent)
